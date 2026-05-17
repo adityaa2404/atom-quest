@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -Path \"d:\\\\atom-quest\\\\frontend\" -Recurse -Force)",
+      "Bash(Select-Object -Property FullName, PSIsContainer)",
+      "Bash(Sort-Object FullName)",
+      "Bash(Get-ChildItem -Path \"d:\\\\atom-quest\\\\backend\" -Recurse -Force)",
+      "Bash(Select-Object FullName, PSIsContainer)",
+      "Bash(pip show *)",
+      "PowerShell(Start-Sleep -Seconds 2; try { $h = Invoke-RestMethod -Uri \"http://localhost:8000/health\"; Write-Host \"Backend UP: $\\($h.status\\)\" } catch { Write-Host \"Backend DOWN: $\\($_.Exception.Message\\)\" })"
+    ]
+  }
+}

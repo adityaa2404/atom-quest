@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.env
+
+# Node
+node_modules/
+dist/
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Supabase
+supabase/.branches/
+supabase/.temp/
+
+# Seed scripts (optional — remove if you want them tracked)
+backend/seed_*.py
+backend/fix_*.py
+backend/check_data.py
