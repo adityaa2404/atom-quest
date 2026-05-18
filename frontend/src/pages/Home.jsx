@@ -68,7 +68,7 @@ export default function Home() {
       {/* Main */}
       <main className="flex-1 flex flex-col items-center justify-center px-8 text-center max-w-2xl mx-auto w-full py-16">
         <p className="text-xs font-semibold tracking-widest text-primary uppercase mb-4">
-          AtomQuest Hackathon 1.0
+          AtomQuest Hackathon
         </p>
         <h1 className="text-4xl font-bold tracking-tight mb-3">
           In-House Goal Setting &amp; Tracking Portal
