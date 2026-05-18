@@ -104,12 +104,10 @@ export default function Analytics() {
     )
   }
 
-  // QoQ trend data
-  const qoqChartData = qoq?.quarters?.map(q => {
-    const entry = { quarter: q }
-    qoq.series?.forEach(s => { entry[s.label] = s.data[q] })
-    return entry
-  }) || []
+  // QoQ trend data — backend returns flat array [{ quarter, avg_score, count }]
+  const qoqChartData = Array.isArray(qoq)
+    ? qoq.map(d => ({ quarter: d.quarter, 'Avg Score': d.avg_score }))
+    : []
 
   // Goal distribution
   const thrustData = dist?.by_thrust_area || []
@@ -123,21 +121,21 @@ export default function Analytics() {
     completed: dist?.status_per_quarter?.[q]?.completed || 0,
   }))
 
-  // Heatmap
-  const departments = heatmap?.departments || []
+  // Heatmap — backend returns { quarters, rows: [{ department, Q1, Q2, Q3, Q4 }] }
+  const departments = (heatmap?.rows || []).map(r => ({ ...r, name: r.department }))
   const quarters = ['Q1','Q2','Q3','Q4']
 
-  // Manager effectiveness
-  const mgrData = (mgr?.managers || []).map(m => ({
+  // Manager effectiveness — backend returns array directly with manager_name, goals_approved_pct
+  const mgrData = (Array.isArray(mgr) ? mgr : []).map(m => ({
     ...m,
     _highlight: (m.q1_checkin_pct || 0) < 50 || (m.q2_checkin_pct || 0) < 50 ||
                 (m.q3_checkin_pct || 0) < 50 || (m.q4_checkin_pct || 0) < 50,
   }))
 
   const mgrColumns = [
-    { key: 'name', label: 'Manager' },
+    { key: 'manager_name', label: 'Manager' },
     { key: 'team_size', label: 'Team Size', right: true },
-    { key: 'approved_pct', label: 'Goals Approved %', right: true,
+    { key: 'goals_approved_pct', label: 'Goals Approved %', right: true,
       render: v => v != null ? `${v.toFixed(1)}%` : '—' },
     { key: 'q1_checkin_pct', label: 'Q1 Check-in %', right: true,
       render: v => v != null ? `${v.toFixed(1)}%` : '—' },
@@ -147,7 +145,7 @@ export default function Analytics() {
       render: v => v != null ? `${v.toFixed(1)}%` : '—' },
     { key: 'q4_checkin_pct', label: 'Q4 Check-in %', right: true,
       render: v => v != null ? `${v.toFixed(1)}%` : '—' },
-    { key: 'avg_score', label: 'Avg Score', right: true,
+    { key: 'avg_team_score', label: 'Avg Score', right: true,
       render: v => v != null ? `${v.toFixed(1)}%` : '—' },
   ]
 
@@ -177,11 +175,10 @@ export default function Analytics() {
                       <YAxis domain={[0, 100]} tick={{ fontSize: 12 }} unit="%" />
                       <Tooltip formatter={(v) => `${Number(v).toFixed(1)}%`} />
                       <Legend />
-                      {qoq?.series?.map((s, i) => (
-                        <Line key={s.label} type="monotone" dataKey={s.label}
-                          stroke={COLORS[i % COLORS.length]} strokeWidth={2}
-                          dot={{ r: 4 }} activeDot={{ r: 6 }} />
-                      ))}
+                      <Line type="monotone" dataKey="Avg Score"
+                        stroke={COLORS[0]} strokeWidth={2}
+                        dot={{ r: 4 }} activeDot={{ r: 6 }}
+                        connectNulls />
                     </LineChart>
                   </ResponsiveContainer>
                 </div>

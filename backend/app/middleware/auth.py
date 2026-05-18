@@ -1,6 +1,25 @@
-import httpx
+import time
+import jwt
 from fastapi import Depends, HTTPException, Request
 from app.config import settings, supabase
+
+# Simple in-process profile cache: { user_id: (profile_dict, expiry_ts) }
+_profile_cache: dict = {}
+_CACHE_TTL = 300  # 5 minutes
+
+
+def _get_profile(user_id: str) -> dict:
+    now = time.time()
+    cached = _profile_cache.get(user_id)
+    if cached and cached[1] > now:
+        return cached[0]
+
+    result = supabase.table("profiles").select("*").eq("id", user_id).maybe_single().execute()
+    if not result.data:
+        raise HTTPException(status_code=403, detail="Profile not found")
+
+    _profile_cache[user_id] = (result.data, now + _CACHE_TTL)
+    return result.data
 
 
 async def get_current_user(request: Request) -> dict:
@@ -9,27 +28,23 @@ async def get_current_user(request: Request) -> dict:
         raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
     token = auth.split(" ", 1)[1]
 
-    # Verify token via Supabase REST API (works with ES256 and HS256)
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(
-            f"{settings.SUPABASE_URL}/auth/v1/user",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "apikey": settings.SUPABASE_SERVICE_ROLE_KEY,
-            },
+    try:
+        payload = jwt.decode(
+            token,
+            settings.SUPABASE_JWT_SECRET,
+            algorithms=["HS256", "ES256"],
+            options={"verify_aud": False},
         )
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
-    if resp.status_code != 200:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-
-    user_id = resp.json().get("id")
+    user_id = payload.get("sub")
     if not user_id:
         raise HTTPException(status_code=401, detail="Token missing user id")
 
-    profile = supabase.table("profiles").select("*").eq("id", user_id).maybe_single().execute()
-    if not profile.data:
-        raise HTTPException(status_code=403, detail="Profile not found")
-    return profile.data
+    return _get_profile(user_id)
 
 
 def require_role(*roles: str):

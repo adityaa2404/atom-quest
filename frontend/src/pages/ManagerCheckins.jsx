@@ -15,12 +15,17 @@ export default function ManagerCheckins() {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    api.get('/api/checkins/active-quarter').then(({ data }) => {
-      setQuarter(data.quarter)
-      return api.get(`/api/checkins/team?quarter=${data.quarter || 'Q1'}`)
-    }).then(({ data }) => {
-      setTeam(data)
-    }).catch(() => {}).finally(() => setLoading(false))
+    async function load() {
+      try {
+        const { data: aqData } = await api.get('/api/checkins/active-quarter')
+        const q = aqData.quarter || 'Q1'
+        setQuarter(q)
+        const { data: teamData } = await api.get(`/api/checkins/team?quarter=${q}`)
+        setTeam(teamData)
+      } catch {}
+      finally { setLoading(false) }
+    }
+    load()
   }, [])
 
   const done = team.filter(e => e.checkin_done).length

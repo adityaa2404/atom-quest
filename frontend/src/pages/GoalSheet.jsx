@@ -227,6 +227,16 @@ export default function GoalSheet({ reviewMode = false }) {
   }
 
   async function handleManagerSaveEdits() {
+    // Validate total weightage before sending anything
+    const newTotal = goals.reduce((sum, g) => {
+      const edited = managerEdits[g.id]
+      return sum + (edited?.weightage ?? g.weightage)
+    }, 0)
+    if (newTotal !== 100) {
+      showToast(`Total weightage must equal 100% (currently ${newTotal}%)`, 'error')
+      return
+    }
+
     for (const [goalId, updates] of Object.entries(managerEdits)) {
       try {
         await api.put(`/api/goals/sheets/${sheet.id}/goals/${goalId}/manager-edit`, updates)
@@ -275,8 +285,16 @@ export default function GoalSheet({ reviewMode = false }) {
           </div>
         </div>
         {isManager && reviewMode && sheet.status === 'submitted' && (
-          <div className="flex gap-2">
-            <Button variant="outline" onClick={() => setManagerEditMode(!managerEditMode)}>
+          <div className="flex items-center gap-2">
+            {managerEditMode && (() => {
+              const editedTotal = goals.reduce((sum, g) => sum + (managerEdits[g.id]?.weightage ?? g.weightage), 0)
+              return (
+                <span className={`text-sm font-medium ${editedTotal === 100 ? 'text-green-600' : 'text-red-600'}`}>
+                  Total: {editedTotal}%
+                </span>
+              )
+            })()}
+            <Button variant="outline" onClick={() => { setManagerEditMode(!managerEditMode); setManagerEdits({}) }}>
               {managerEditMode ? 'Cancel Edit' : 'Edit Mode'}
             </Button>
             {managerEditMode && <Button onClick={handleManagerSaveEdits}>Save Edits</Button>}

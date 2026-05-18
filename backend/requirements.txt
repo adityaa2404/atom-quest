@@ -6,4 +6,5 @@ pydantic-settings
 python-dotenv
 openpyxl
 httpx
+PyJWT[crypto]
 python-multipart

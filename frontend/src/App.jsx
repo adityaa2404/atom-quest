@@ -4,6 +4,7 @@ import { supabase } from '@/lib/supabase'
 import { Skeleton } from '@/components/ui/skeleton'
 import Layout from '@/components/layout/Layout'
 
+import Home from '@/pages/Home'
 import Login from '@/pages/Login'
 import EmployeeDashboard from '@/pages/EmployeeDashboard'
 import ManagerDashboard from '@/pages/ManagerDashboard'
@@ -83,8 +84,9 @@ const router = createBrowserRouter([
   {
     element: <AuthRoot />,
     children: [
+      { path: '/', element: <Home /> },
       { path: '/login', element: <Login /> },
-      { path: '/', element: <RootRedirect /> },
+      { path: '/dashboard', element: <RootRedirect /> },
       { path: '/employee', element: <ProtectedRoute allowedRoles={['employee', 'manager', 'admin']}><EmployeeDashboard /></ProtectedRoute> },
       { path: '/goals', element: <ProtectedRoute allowedRoles={['employee', 'manager', 'admin']}><GoalSheet /></ProtectedRoute> },
       { path: '/goals/:sheetId', element: <ProtectedRoute allowedRoles={['employee', 'manager', 'admin']}><GoalSheet /></ProtectedRoute> },

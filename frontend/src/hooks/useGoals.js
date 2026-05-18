@@ -32,24 +32,31 @@ export function useGoals(cycleId) {
 
   async function addGoal(sheetId, goalData) {
     const { data } = await api.post(`/api/goals/sheets/${sheetId}/goals`, goalData)
-    await fetchSheet()
+    // Update goals list optimistically from response instead of full refetch
+    setSheet(prev => prev ? { ...prev, goals: [...(prev.goals || []), data] } : prev)
     return data
   }
 
   async function editGoal(goalId, updates) {
     const { data } = await api.put(`/api/goals/${goalId}`, updates)
-    await fetchSheet()
+    setSheet(prev => prev ? {
+      ...prev,
+      goals: (prev.goals || []).map(g => g.id === goalId ? { ...g, ...data } : g)
+    } : prev)
     return data
   }
 
   async function deleteGoal(goalId) {
     await api.delete(`/api/goals/${goalId}`)
-    await fetchSheet()
+    setSheet(prev => prev ? {
+      ...prev,
+      goals: (prev.goals || []).filter(g => g.id !== goalId)
+    } : prev)
   }
 
   async function submitSheet(sheetId) {
     const { data } = await api.post(`/api/goals/sheets/${sheetId}/submit`)
-    await fetchSheet()
+    setSheet(data)
     return data
   }
 

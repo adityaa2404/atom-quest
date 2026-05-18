@@ -1,0 +1,82 @@
+@startuml AtomQuest Architecture
+skinparam linetype ortho
+skinparam backgroundColor #FFFFFF
+skinparam defaultFontName Segoe UI
+skinparam defaultFontSize 12
+skinparam nodesep 30
+skinparam ranksep 40
+
+skinparam rectangle {
+  BackgroundColor #F7F8FA
+  BorderColor #CCCCCC
+  BorderThickness 1.5
+  RoundCorner 8
+  FontStyle bold
+  FontSize 12
+}
+
+skinparam card {
+  BackgroundColor #FFFFFF
+  BorderColor #DDDDDD
+  BorderThickness 1
+  RoundCorner 6
+  FontSize 11
+}
+
+skinparam database {
+  BackgroundColor #FFFBEA
+  BorderColor #FFD524
+  BorderThickness 2
+  FontSize 11
+}
+
+skinparam actor {
+  BorderColor #444444
+  BackgroundColor #FFFFFF
+  FontSize 11
+}
+
+skinparam ArrowThickness 1.5
+skinparam ArrowColor #888888
+skinparam ArrowFontSize 10
+skinparam ArrowFontColor #555555
+
+title <b>AtomQuest Goal Portal — Architecture</b>
+
+' ── Users (top row) ──────────────────────────────
+actor "Employee"   as EMP
+actor "Manager"    as MGR
+actor "Admin / HR" as ADM
+
+' ── Frontend ──────────────────────────────────────
+rectangle "Frontend  ·  React + Vite  ·  Vercel" as FE {
+  card "Home · Login"                              as C1
+  card "Employee Dashboard\nGoal Sheet · Check-ins" as C2
+  card "Manager Dashboard\nTeam · Analytics"        as C3
+  card "Admin Dashboard\nCycles · Audit · Export"   as C4
+}
+
+' ── Backend ───────────────────────────────────────
+rectangle "Backend  ·  FastAPI / Python  ·  Render" as BE {
+  card "API Routers\n/goals  /checkins  /admin\n/analytics  /escalations  /reports" as API
+  card "Services\nScore Engine (6 UoM)  ·  Escalation (L1→L2→L3)\nAudit Logging  ·  Excel Export" as SVC
+}
+
+' ── Supabase ──────────────────────────────────────
+rectangle "Supabase  ·  BaaS" as SB {
+  card "Auth  ·  JWT / ES256\nsignIn · getSession · verify" as AUTH
+  database "PostgreSQL  ·  11 Tables\nprofiles · cycles · goals · goal_sheets\nachievements · checkins · audit_logs\nescalation_rules/logs · thrust_areas" as DB
+}
+
+' ── Flows ─────────────────────────────────────────
+EMP -down-> FE
+MGR -down-> FE
+ADM -down-> FE
+
+FE  -down-> BE   : "REST API (Axios + Bearer JWT)"
+FE  -down-> AUTH : "signIn / getSession"
+BE  -down-> AUTH : "verify token (httpx)"
+BE  -down-> DB   : "read / write  (service role key)"
+AUTH -right-> DB : "role lookup"
+
+@enduml

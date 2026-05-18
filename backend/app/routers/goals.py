@@ -385,6 +385,19 @@ async def manager_edit_goal(
         updates["target_date"] = updates["target_date"].isoformat()
     updates["updated_at"] = _now_iso()
 
+    # Validate total weightage won't exceed 100 after this edit
+    if "weightage" in updates:
+        if updates["weightage"] < 10:
+            raise HTTPException(400, "Minimum weightage per goal is 10%")
+        all_goals = supabase.table("goals").select("id,weightage")\
+            .eq("goal_sheet_id", sheet_id).execute()
+        new_total = sum(
+            updates["weightage"] if g["id"] == goal_id else g["weightage"]
+            for g in all_goals.data
+        )
+        if new_total != 100:
+            raise HTTPException(400, f"Total weightage must equal 100% (would be {new_total}% after this edit)")
+
     result = supabase.table("goals").update(updates).eq("id", goal_id).execute()
 
     log_audit("goal", goal_id, "manager_edit", current_user["id"],
