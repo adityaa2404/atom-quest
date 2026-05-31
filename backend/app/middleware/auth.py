@@ -1,3 +1,4 @@
+import asyncio
 import time
 import jwt
 from fastapi import Depends, HTTPException, Request
@@ -8,18 +9,25 @@ _profile_cache: dict = {}
 _CACHE_TTL = 300  # 5 minutes
 
 
-def _get_profile(user_id: str) -> dict:
+def _fetch_profile_sync(user_id: str) -> dict | None:
+    """Blocking DB fetch — always run via run_in_executor to avoid blocking the event loop."""
+    result = supabase.table("profiles").select("*").eq("id", user_id).maybe_single().execute()
+    return result.data
+
+
+async def _get_profile(user_id: str) -> dict:
     now = time.time()
     cached = _profile_cache.get(user_id)
     if cached and cached[1] > now:
         return cached[0]
 
-    result = supabase.table("profiles").select("*").eq("id", user_id).maybe_single().execute()
-    if not result.data:
+    loop = asyncio.get_event_loop()
+    data = await loop.run_in_executor(None, _fetch_profile_sync, user_id)
+    if not data:
         raise HTTPException(status_code=403, detail="Profile not found")
 
-    _profile_cache[user_id] = (result.data, now + _CACHE_TTL)
-    return result.data
+    _profile_cache[user_id] = (data, now + _CACHE_TTL)
+    return data
 
 
 async def get_current_user(request: Request) -> dict:
@@ -44,7 +52,7 @@ async def get_current_user(request: Request) -> dict:
     if not user_id:
         raise HTTPException(status_code=401, detail="Token missing user id")
 
-    return _get_profile(user_id)
+    return await _get_profile(user_id)
 
 
 def require_role(*roles: str):

@@ -1,18 +1,16 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from typing import Optional
 from datetime import date
 
 from app.config import supabase
 from app.middleware.auth import manager_or_above
+from app.utils import get_active_cycle
 
 router = APIRouter()
 
 
 def _get_active_cycle_id() -> str:
-    result = supabase.table("cycles").select("id").eq("is_active", True).maybe_single().execute()
-    if not result.data:
-        raise HTTPException(400, "No active cycle found")
-    return result.data["id"]
+    return get_active_cycle(supabase)["id"]
 
 
 # ── QoQ Achievement Trends ────────────────────────────────────────────────────
@@ -175,57 +173,89 @@ async def manager_effectiveness(
     if not managers_r.data:
         return []
 
+    # Batch-fetch all employees, sheets, goals, achievements, and checkins up front
+    all_employees_r = supabase.table("profiles").select("id, manager_id").eq("role", "employee").execute()
+    emp_to_mgr = {e["id"]: e["manager_id"] for e in all_employees_r.data}
+
+    # Build manager → [employee_ids] map
+    mgr_team: dict = {}
+    for emp_id, mgr_id in emp_to_mgr.items():
+        if mgr_id:
+            mgr_team.setdefault(mgr_id, []).append(emp_id)
+
+    all_emp_ids = list(emp_to_mgr.keys())
+    sheets_r = supabase.table("goal_sheets").select("id, employee_id, status")\
+        .eq("cycle_id", cycle_id).in_("employee_id", all_emp_ids).execute()
+    # sheet indexed by employee_id
+    emp_sheet_map = {s["employee_id"]: s for s in sheets_r.data}
+
+    all_locked_sheets = [s for s in sheets_r.data if s["status"] in ("locked", "approved")]
+    all_locked_sheet_ids = [s["id"] for s in all_locked_sheets]
+    locked_sheet_emp = {s["id"]: s["employee_id"] for s in all_locked_sheets}
+
+    # Fetch all checkins for locked sheets at once
+    checkins_by_sheet_q: dict = {}  # {(sheet_id, quarter): True}
+    if all_locked_sheet_ids:
+        checkins_r = supabase.table("checkins").select("goal_sheet_id, quarter")\
+            .in_("goal_sheet_id", all_locked_sheet_ids).execute()
+        for c in checkins_r.data:
+            checkins_by_sheet_q[(c["goal_sheet_id"], c["quarter"])] = True
+
+    # Fetch all goals and achievements for locked sheets at once
+    goals_by_sheet: dict = {}
+    ach_by_goal: dict = {}
+    if all_locked_sheet_ids:
+        all_goals_r = supabase.table("goals").select("id, goal_sheet_id, weightage")\
+            .in_("goal_sheet_id", all_locked_sheet_ids).execute()
+        for g in all_goals_r.data:
+            goals_by_sheet.setdefault(g["goal_sheet_id"], []).append(g)
+        all_goal_ids = [g["id"] for g in all_goals_r.data]
+        if all_goal_ids:
+            ach_r = supabase.table("achievements").select("goal_id, computed_score")\
+                .in_("goal_id", all_goal_ids).execute()
+            ach_by_goal = {a["goal_id"]: a["computed_score"] for a in ach_r.data
+                           if a["computed_score"] is not None}
+
     result = []
     for mgr in managers_r.data:
-        team_r = supabase.table("profiles").select("id").eq("manager_id", mgr["id"]).execute()
-        team_size = len(team_r.data)
+        team_ids = mgr_team.get(mgr["id"], [])
+        team_size = len(team_ids)
         if team_size == 0:
             continue
 
-        team_ids = [t["id"] for t in team_r.data]
-        sheets_r = supabase.table("goal_sheets").select("id, employee_id, status")\
-            .eq("cycle_id", cycle_id).in_("employee_id", team_ids).execute()
-
-        approved = sum(1 for s in sheets_r.data if s["status"] in ("locked", "approved"))
-        sheet_map = {s["employee_id"]: s for s in sheets_r.data}
+        team_sheets = [emp_sheet_map[e] for e in team_ids if e in emp_sheet_map]
+        approved = sum(1 for s in team_sheets if s["status"] in ("locked", "approved"))
+        mgr_locked = [s for s in team_sheets if s["status"] in ("locked", "approved")]
+        mgr_locked_ids = [s["id"] for s in mgr_locked]
 
         checkin_pcts = {}
-        locked_sheets = [s for s in sheets_r.data if s["status"] in ("locked", "approved")]
-        locked_sheet_ids = [s["id"] for s in locked_sheets]
-
         for q in ["Q1", "Q2", "Q3", "Q4"]:
-            if locked_sheet_ids:
-                c = supabase.table("checkins").select("goal_sheet_id")\
-                    .in_("goal_sheet_id", locked_sheet_ids).eq("quarter", q).execute()
-                checkin_pcts[q] = round(len(c.data) / len(locked_sheets) * 100, 1) if locked_sheets else 0.0
+            if mgr_locked_ids:
+                done = sum(1 for sid in mgr_locked_ids if (sid, q) in checkins_by_sheet_q)
+                checkin_pcts[q] = round(done / len(mgr_locked_ids) * 100, 1)
             else:
                 checkin_pcts[q] = 0.0
 
-        # Average team score across all goals/quarters
         avg_score = None
-        if locked_sheet_ids:
-            goals_r = supabase.table("goals").select("id, weightage")\
-                .in_("goal_sheet_id", locked_sheet_ids).execute()
-            goal_ids = [g["id"] for g in goals_r.data]
-            if goal_ids:
-                ach_r = supabase.table("achievements").select("goal_id, computed_score")\
-                    .in_("goal_id", goal_ids).execute()
-                ach_map = {a["goal_id"]: a["computed_score"] for a in ach_r.data if a["computed_score"] is not None}
-                goal_w = {g["id"]: g["weightage"] for g in goals_r.data}
-                scored = [(float(goal_w[gid]), float(score)) for gid, score in ach_map.items() if gid in goal_w]
-                if scored:
-                    total_w = sum(w for w, _ in scored)
-                    avg_score = round(sum(w * s for w, s in scored) / total_w, 1) if total_w > 0 else None
+        scored = []
+        for sid in mgr_locked_ids:
+            for g in goals_by_sheet.get(sid, []):
+                score = ach_by_goal.get(g["id"])
+                if score is not None:
+                    scored.append((float(g["weightage"]), float(score)))
+        if scored:
+            total_w = sum(w for w, _ in scored)
+            avg_score = round(sum(w * s for w, s in scored) / total_w, 1) if total_w > 0 else None
 
         result.append({
             "manager_id": mgr["id"],
             "manager_name": mgr["full_name"],
             "team_size": team_size,
             "goals_approved_pct": round(approved / team_size * 100, 1),
-            "q1_checkin_pct": checkin_pcts.get("Q1", 0.0),
-            "q2_checkin_pct": checkin_pcts.get("Q2", 0.0),
-            "q3_checkin_pct": checkin_pcts.get("Q3", 0.0),
-            "q4_checkin_pct": checkin_pcts.get("Q4", 0.0),
+            "q1_checkin_pct": checkin_pcts["Q1"],
+            "q2_checkin_pct": checkin_pcts["Q2"],
+            "q3_checkin_pct": checkin_pcts["Q3"],
+            "q4_checkin_pct": checkin_pcts["Q4"],
             "avg_team_score": avg_score,
         })
 

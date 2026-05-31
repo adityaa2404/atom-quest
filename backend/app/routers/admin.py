@@ -1,5 +1,4 @@
 from fastapi import APIRouter, Depends, HTTPException
-from datetime import datetime, timezone
 from typing import Optional
 
 from app.config import supabase
@@ -10,12 +9,9 @@ from app.models.admin import (
 )
 from app.models.user import ProfileCreate, ProfileUpdate
 from app.services.audit_service import log_audit
+from app.utils import now_iso, invalidate_cycle_cache, get_active_cycle, get_open_quarter
 
 router = APIRouter()
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 # ── Cycles ────────────────────────────────────────────────────────────────────
@@ -72,6 +68,7 @@ async def activate_cycle(
     # Activate the selected one
     result = supabase.table("cycles").update({"is_active": True}).eq("id", cycle_id).execute()
 
+    invalidate_cycle_cache()
     log_audit("cycle", cycle_id, "activate", current_user["id"],
               new_values={"is_active": True})
     return result.data[0]
@@ -246,38 +243,25 @@ async def completion_dashboard(
     current_user: dict = Depends(admin_only),
 ):
     if not cycle_id:
-        cycle_r = supabase.table("cycles").select("*").eq("is_active", True).maybe_single().execute()
-        if not cycle_r.data:
-            raise HTTPException(400, "No active cycle found")
-        cycle_id = cycle_r.data["id"]
-        cycle = cycle_r.data
+        cycle = get_active_cycle(supabase)
+        cycle_id = cycle["id"]
     else:
         cycle_r = supabase.table("cycles").select("*").eq("id", cycle_id).maybe_single().execute()
+        if not cycle_r.data:
+            raise HTTPException(404, "Cycle not found")
         cycle = cycle_r.data
 
     employees = supabase.table("profiles").select("id, full_name, department, manager_id")\
         .eq("role", "employee").execute()
     total_employees = len(employees.data)
 
-    sheets = supabase.table("goal_sheets").select("*")\
+    sheets = supabase.table("goal_sheets").select("id, status")\
         .eq("cycle_id", cycle_id).execute()
 
     submitted = sum(1 for s in sheets.data if s["status"] in ("submitted", "locked", "approved"))
     approved = sum(1 for s in sheets.data if s["status"] in ("locked", "approved"))
 
-    from datetime import date as date_type
-
-    def get_open_quarter(c):
-        today = date_type.today()
-        for q in ["Q1", "Q2", "Q3", "Q4"]:
-            qs = c.get(f"{q.lower()}_start")
-            qe = c.get(f"{q.lower()}_end")
-            if qs and qe:
-                if date_type.fromisoformat(str(qs)) <= today <= date_type.fromisoformat(str(qe)):
-                    return q
-        return None
-
-    current_quarter = get_open_quarter(cycle) if cycle else None
+    current_quarter = get_open_quarter(cycle)
     checkin_pct = 0.0
 
     if current_quarter and approved > 0:

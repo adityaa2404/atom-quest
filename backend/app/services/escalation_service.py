@@ -1,22 +1,8 @@
-from datetime import date, datetime, timezone, timedelta
+from datetime import date, timedelta
 from typing import Optional
 
 from app.config import supabase
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _get_open_quarter(cycle: dict) -> Optional[str]:
-    today = date.today()
-    for q in ["Q1", "Q2", "Q3", "Q4"]:
-        qs = cycle.get(f"{q.lower()}_start")
-        qe = cycle.get(f"{q.lower()}_end")
-        if qs and qe:
-            if date.fromisoformat(str(qs)) <= today <= date.fromisoformat(str(qe)):
-                return q
-    return None
+from app.utils import now_iso, get_open_quarter
 
 
 def _create_or_escalate(rule: dict, employee_id: str) -> str:
@@ -40,14 +26,14 @@ def _create_or_escalate(rule: dict, employee_id: str) -> str:
     if esc["current_level"] == 1 and days_since >= rule["level_2_after_days"]:
         supabase.table("escalation_logs").update({
             "current_level": 2,
-            "escalated_to_l2_at": _now_iso(),
+            "escalated_to_l2_at": now_iso(),
         }).eq("id", esc["id"]).execute()
         return "level_ups"
 
     if esc["current_level"] == 2 and days_since >= rule["level_3_after_days"]:
         supabase.table("escalation_logs").update({
             "current_level": 3,
-            "escalated_to_l3_at": _now_iso(),
+            "escalated_to_l3_at": now_iso(),
         }).eq("id", esc["id"]).execute()
         return "level_ups"
 
@@ -61,7 +47,7 @@ def _auto_resolve(rule_id: str, employee_id: str) -> bool:
     if existing.data:
         supabase.table("escalation_logs").update({
             "status": "resolved",
-            "resolved_at": _now_iso(),
+            "resolved_at": now_iso(),
             "notes": "Auto-resolved — employee completed the required action",
         }).eq("id", existing.data["id"]).execute()
         return True
@@ -121,7 +107,7 @@ def run_escalation_check(cycle_id: str) -> dict:
                         results["auto_resolved"] += 1
 
         elif rule["condition_type"] == "checkin_not_completed":
-            current_quarter = _get_open_quarter(cycle)
+            current_quarter = get_open_quarter(cycle)
             if not current_quarter:
                 continue
 

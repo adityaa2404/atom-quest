@@ -1,11 +1,12 @@
 import asyncio
 import io
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from typing import Optional
 
 from app.config import supabase
 from app.middleware.auth import admin_only
+from app.utils import get_active_cycle
 
 router = APIRouter()
 
@@ -96,39 +97,47 @@ def _fetch_report_data(cycle_id: str) -> dict:
         .eq("cycle_id", cycle_id).execute()
     sheets_map = {s["employee_id"]: s for s in sheets.data}
 
+    # Batch-fetch all goals and achievements for the cycle at once
+    sheet_ids = [s["id"] for s in sheets.data]
+    goals_by_sheet: dict = {}
+    ach_by_goal: dict = {}
+    if sheet_ids:
+        all_goals_r = supabase.table("goals").select("*")\
+            .in_("goal_sheet_id", sheet_ids).order("sort_order").execute()
+        for g in all_goals_r.data:
+            goals_by_sheet.setdefault(g["goal_sheet_id"], []).append(g)
+
+        all_goal_ids = [g["id"] for g in all_goals_r.data]
+        if all_goal_ids:
+            all_ach_r = supabase.table("achievements").select("*")\
+                .in_("goal_id", all_goal_ids).execute()
+            for a in all_ach_r.data:
+                ach_by_goal.setdefault(a["goal_id"], {})[a["quarter"]] = a
+
     rows = []
     for emp in employees.data:
         sheet = sheets_map.get(emp["id"])
+        emp_name = emp["full_name"]
+        emp_dept = emp.get("department", "")
+        emp_mgr = managers.get(emp.get("manager_id", ""), "")
+
         if not sheet:
-            rows.append({
-                "employee_name": emp["full_name"],
-                "department": emp.get("department", ""),
-                "manager_name": managers.get(emp.get("manager_id", ""), ""),
-                "goal_title": "(No goal sheet)",
-            })
+            rows.append({"employee_name": emp_name, "department": emp_dept,
+                         "manager_name": emp_mgr, "goal_title": "(No goal sheet)"})
             continue
 
-        goals_r = supabase.table("goals").select("*")\
-            .eq("goal_sheet_id", sheet["id"]).order("sort_order").execute()
-
-        if not goals_r.data:
-            rows.append({
-                "employee_name": emp["full_name"],
-                "department": emp.get("department", ""),
-                "manager_name": managers.get(emp.get("manager_id", ""), ""),
-                "goal_title": "(No goals)",
-            })
+        goals = goals_by_sheet.get(sheet["id"], [])
+        if not goals:
+            rows.append({"employee_name": emp_name, "department": emp_dept,
+                         "manager_name": emp_mgr, "goal_title": "(No goals)"})
             continue
 
-        for g in goals_r.data:
-            ach_r = supabase.table("achievements").select("*")\
-                .eq("goal_id", g["id"]).execute()
-            ach_by_q = {a["quarter"]: a for a in ach_r.data}
-
+        for g in goals:
+            ach_by_q = ach_by_goal.get(g["id"], {})
             row = {
-                "employee_name": emp["full_name"],
-                "department": emp.get("department", ""),
-                "manager_name": managers.get(emp.get("manager_id", ""), ""),
+                "employee_name": emp_name,
+                "department": emp_dept,
+                "manager_name": emp_mgr,
                 "goal_title": g["title"],
                 "thrust_area": thrust_areas.get(g.get("thrust_area_id", ""), ""),
                 "uom_type": g["uom_type"],
@@ -137,8 +146,14 @@ def _fetch_report_data(cycle_id: str) -> dict:
             }
             for q in ["Q1", "Q2", "Q3", "Q4"]:
                 ach = ach_by_q.get(q)
-                row[f"{q.lower()}_actual"] = ach["actual_value"] if ach and ach.get("actual_value") is not None else (ach["actual_date"] if ach else "")
-                row[f"{q.lower()}_score"] = round(float(ach["computed_score"]), 1) if ach and ach.get("computed_score") is not None else ""
+                row[f"{q.lower()}_actual"] = (
+                    ach["actual_value"] if ach and ach.get("actual_value") is not None
+                    else (ach["actual_date"] if ach else "")
+                )
+                row[f"{q.lower()}_score"] = (
+                    round(float(ach["computed_score"]), 1)
+                    if ach and ach.get("computed_score") is not None else ""
+                )
                 row[f"{q.lower()}_status"] = ach["status"] if ach else ""
 
             scores = [float(ach_by_q[q]["computed_score"]) for q in ["Q1", "Q2", "Q3", "Q4"]
@@ -155,10 +170,7 @@ async def export_achievement_report(
     current_user: dict = Depends(admin_only),
 ):
     if not cycle_id:
-        cycle_r = supabase.table("cycles").select("id").eq("is_active", True).maybe_single().execute()
-        if not cycle_r.data:
-            raise HTTPException(400, "No active cycle found")
-        cycle_id = cycle_r.data["id"]
+        cycle_id = get_active_cycle(supabase)["id"]
 
     loop = asyncio.get_event_loop()
     data = await loop.run_in_executor(None, _fetch_report_data, cycle_id)

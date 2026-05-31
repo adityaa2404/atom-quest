@@ -1,58 +1,22 @@
 from fastapi import APIRouter, Depends, HTTPException
-from datetime import datetime, timezone, date
+from datetime import date
 from typing import Optional
 
 from app.config import supabase
 from app.middleware.auth import get_current_user, manager_or_above
 from app.models.checkin import AchievementSave, CheckinSubmit
 from app.services.score_engine import compute_score
+from app.utils import now_iso, get_active_cycle, get_open_quarter, is_quarter_open
 
 router = APIRouter()
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _get_active_cycle() -> dict:
-    result = supabase.table("cycles").select("*").eq("is_active", True).maybe_single().execute()
-    if not result.data:
-        raise HTTPException(400, "No active cycle found")
-    return result.data
-
-
-def _get_open_quarter(cycle: dict) -> Optional[str]:
-    today = date.today()
-    quarters = [
-        ("Q1", cycle.get("q1_start"), cycle.get("q1_end")),
-        ("Q2", cycle.get("q2_start"), cycle.get("q2_end")),
-        ("Q3", cycle.get("q3_start"), cycle.get("q3_end")),
-        ("Q4", cycle.get("q4_start"), cycle.get("q4_end")),
-    ]
-    for q_name, q_start, q_end in quarters:
-        if q_start and q_end:
-            if date.fromisoformat(str(q_start)) <= today <= date.fromisoformat(str(q_end)):
-                return q_name
-    return None
-
-
-def _is_quarter_open(cycle: dict, quarter: str) -> bool:
-    today = date.today()
-    start_key = f"{quarter.lower()}_start"
-    end_key = f"{quarter.lower()}_end"
-    q_start = cycle.get(start_key)
-    q_end = cycle.get(end_key)
-    if not q_start or not q_end:
-        return False
-    return date.fromisoformat(str(q_start)) <= today <= date.fromisoformat(str(q_end))
 
 
 # ── Active Quarter ────────────────────────────────────────────────────────────
 
 @router.get("/active-quarter")
 async def get_active_quarter(current_user: dict = Depends(get_current_user)):
-    cycle = _get_active_cycle()
-    quarter = _get_open_quarter(cycle)
+    cycle = get_active_cycle(supabase)
+    quarter = get_open_quarter(cycle)
     return {
         "quarter": quarter,
         "cycle_id": cycle["id"],
@@ -68,9 +32,9 @@ async def get_my_goals_for_quarter(
     quarter: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
 ):
-    cycle = _get_active_cycle()
+    cycle = get_active_cycle(supabase)
     if not quarter:
-        quarter = _get_open_quarter(cycle)
+        quarter = get_open_quarter(cycle)
 
     sheet = supabase.table("goal_sheets").select("*")\
         .eq("employee_id", current_user["id"]).eq("cycle_id", cycle["id"])\
@@ -99,7 +63,7 @@ async def get_my_goals_for_quarter(
             "achievement": achievements.get(g["id"]),
         })
 
-    is_open = _is_quarter_open(cycle, quarter) if quarter else False
+    is_open = is_quarter_open(cycle, quarter) if quarter else False
 
     return {
         "quarter": quarter,
@@ -126,8 +90,8 @@ async def save_achievement(
     if sheet.get("status") not in ("locked", "approved"):
         raise HTTPException(400, "Goal sheet must be approved before logging achievements")
 
-    cycle = _get_active_cycle()
-    if not _is_quarter_open(cycle, body.quarter):
+    cycle = get_active_cycle(supabase)
+    if not is_quarter_open(cycle, body.quarter):
         raise HTTPException(400, f"{body.quarter} check-in window is not currently open")
 
     score = compute_score(
@@ -146,7 +110,7 @@ async def save_achievement(
         "status": body.status,
         "computed_score": score,
         "employee_comment": body.comment,
-        "updated_at": _now_iso(),
+        "updated_at": now_iso(),
     }, on_conflict="goal_id,quarter").execute()
 
     return {"message": "Achievement saved", "computed_score": score}
@@ -161,11 +125,11 @@ async def get_team_checkin_status(
     current_user: dict = Depends(manager_or_above),
 ):
     if not cycle_id:
-        cycle = _get_active_cycle()
+        cycle = get_active_cycle(supabase)
         cycle_id = cycle["id"]
     if not quarter:
-        cycle = supabase.table("cycles").select("*").eq("id", cycle_id).maybe_single().execute()
-        quarter = _get_open_quarter(cycle.data) if cycle.data else None
+        cycle_r = supabase.table("cycles").select("*").eq("id", cycle_id).maybe_single().execute()
+        quarter = get_open_quarter(cycle_r.data) if cycle_r.data else None
 
     team = supabase.table("profiles").select("id, full_name, email, department")\
         .eq("manager_id", current_user["id"]).execute()
@@ -184,6 +148,22 @@ async def get_team_checkin_status(
             .in_("goal_sheet_id", sheet_ids).eq("quarter", quarter).execute()
         checkins_map = {c["goal_sheet_id"]: c for c in checkins.data}
 
+    # Batch-fetch all goals and achievements for the whole team at once
+    locked_sheet_ids = [s["id"] for s in sheets.data if s["status"] in ("locked", "approved")]
+    goals_by_sheet: dict = {}
+    ach_by_goal: dict = {}
+    if quarter and locked_sheet_ids:
+        all_goals_r = supabase.table("goals").select("id, goal_sheet_id, weightage")\
+            .in_("goal_sheet_id", locked_sheet_ids).execute()
+        for g in all_goals_r.data:
+            goals_by_sheet.setdefault(g["goal_sheet_id"], []).append(g)
+
+        all_goal_ids = [g["id"] for g in all_goals_r.data]
+        if all_goal_ids:
+            all_ach_r = supabase.table("achievements").select("goal_id, computed_score")\
+                .in_("goal_id", all_goal_ids).eq("quarter", quarter).execute()
+            ach_by_goal = {a["goal_id"]: a["computed_score"] for a in all_ach_r.data}
+
     result = []
     for emp in team.data:
         sheet = sheets_map.get(emp["id"])
@@ -191,22 +171,16 @@ async def get_team_checkin_status(
 
         weighted_score = None
         has_achievements = False
-        if sheet and quarter:
-            goals_r = supabase.table("goals").select("id, weightage")\
-                .eq("goal_sheet_id", sheet["id"]).execute()
-            if goals_r.data:
-                goal_ids = [g["id"] for g in goals_r.data]
-                ach_r = supabase.table("achievements").select("goal_id, computed_score")\
-                    .in_("goal_id", goal_ids).eq("quarter", quarter).execute()
-                if ach_r.data:
+        if sheet and quarter and sheet["status"] in ("locked", "approved"):
+            goals = goals_by_sheet.get(sheet["id"], [])
+            if goals:
+                scored = [(float(g["weightage"]), ach_by_goal.get(g["id"]))
+                          for g in goals if ach_by_goal.get(g["id"]) is not None]
+                if scored:
                     has_achievements = True
-                    ach_map = {a["goal_id"]: a["computed_score"] for a in ach_r.data}
-                    total_w = sum(float(g["weightage"]) for g in goals_r.data)
+                    total_w = sum(w for w, _ in scored)
                     if total_w > 0:
-                        weighted_score = sum(
-                            float(g["weightage"]) * float(ach_map.get(g["id"]) or 0)
-                            for g in goals_r.data
-                        ) / total_w
+                        weighted_score = sum(w * float(s) for w, s in scored) / total_w
 
         result.append({
             **emp,
@@ -234,9 +208,9 @@ async def get_employee_checkin_detail(
             and employee.data.get("manager_id") != current_user["id"]):
         raise HTTPException(403, "This employee does not report to you")
 
-    cycle = _get_active_cycle()
+    cycle = get_active_cycle(supabase)
     if not quarter:
-        quarter = _get_open_quarter(cycle)
+        quarter = get_open_quarter(cycle)
 
     sheet = supabase.table("goal_sheets").select("*")\
         .eq("employee_id", employee_id).eq("cycle_id", cycle["id"])\

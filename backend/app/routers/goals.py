@@ -1,5 +1,4 @@
 from fastapi import APIRouter, Depends, HTTPException
-from datetime import datetime, timezone
 from typing import Optional
 
 from app.config import supabase
@@ -9,19 +8,9 @@ from app.models.goal import (
     ReturnSheetRequest, SharedGoalCreate, ManagerGoalEdit,
 )
 from app.services.audit_service import log_audit
+from app.utils import now_iso, get_active_cycle
 
 router = APIRouter()
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _get_active_cycle() -> dict:
-    result = supabase.table("cycles").select("*").eq("is_active", True).maybe_single().execute()
-    if not result.data:
-        raise HTTPException(400, "No active cycle found")
-    return result.data
 
 
 def _get_or_create_sheet(employee_id: str, cycle_id: str) -> dict:
@@ -54,7 +43,7 @@ async def get_my_sheet(
     current_user: dict = Depends(get_current_user),
 ):
     if not cycle_id:
-        cycle = _get_active_cycle()
+        cycle = get_active_cycle(supabase)
         cycle_id = cycle["id"]
 
     sheet = supabase.table("goal_sheets").select("*")\
@@ -148,7 +137,7 @@ async def update_goal(
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
     if "target_date" in updates and updates["target_date"]:
         updates["target_date"] = updates["target_date"].isoformat()
-    updates["updated_at"] = _now_iso()
+    updates["updated_at"] = now_iso()
 
     result = supabase.table("goals").update(updates).eq("id", goal_id).execute()
     return result.data[0]
@@ -214,7 +203,7 @@ async def submit_sheet(
     old_status = sheet.data["status"]
     supabase.table("goal_sheets").update({
         "status": "submitted",
-        "submitted_at": _now_iso(),
+        "submitted_at": now_iso(),
         "return_comment": None,
     }).eq("id", sheet_id).execute()
 
@@ -232,7 +221,7 @@ async def get_team_sheets(
     current_user: dict = Depends(manager_or_above),
 ):
     if not cycle_id:
-        cycle = _get_active_cycle()
+        cycle = get_active_cycle(supabase)
         cycle_id = cycle["id"]
 
     team = supabase.table("profiles").select("id, full_name, email, department")\
@@ -307,7 +296,7 @@ async def approve_sheet(
     old_status = sheet.data["status"]
     supabase.table("goal_sheets").update({
         "status": "locked",
-        "approved_at": _now_iso(),
+        "approved_at": now_iso(),
         "approved_by": current_user["id"],
     }).eq("id", sheet_id).execute()
 
@@ -383,7 +372,7 @@ async def manager_edit_goal(
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
     if "target_date" in updates and updates["target_date"]:
         updates["target_date"] = updates["target_date"].isoformat()
-    updates["updated_at"] = _now_iso()
+    updates["updated_at"] = now_iso()
 
     # Validate total weightage won't exceed 100 after this edit
     if "weightage" in updates:
@@ -437,13 +426,30 @@ async def create_shared_goal(
     }).execute()
     group_id = group_result.data[0]["id"]
 
+    # Fetch all existing sheets in one query
+    existing_sheets_r = supabase.table("goal_sheets").select("id, employee_id, status")\
+        .eq("cycle_id", body.cycle_id).in_("employee_id", body.employee_ids).execute()
+    sheets_by_emp = {s["employee_id"]: s for s in existing_sheets_r.data}
+
+    # Create missing sheets in bulk
+    employees_needing_sheets = [e for e in body.employee_ids if e not in sheets_by_emp]
+    if employees_needing_sheets:
+        new_sheets = supabase.table("goal_sheets").insert([
+            {"employee_id": emp_id, "cycle_id": body.cycle_id, "status": "draft"}
+            for emp_id in employees_needing_sheets
+        ]).execute()
+        for s in new_sheets.data:
+            sheets_by_emp[s["employee_id"]] = s
+
     pushed = 0
     skipped = []
+    goals_to_insert = []
+    target_date_iso = body.target_date.isoformat() if body.target_date else None
 
     for emp_id in body.employee_ids:
-        sheet = _get_or_create_sheet(emp_id, body.cycle_id)
-        if sheet["status"] in ("draft", "returned"):
-            supabase.table("goals").insert({
+        sheet = sheets_by_emp.get(emp_id)
+        if sheet and sheet["status"] in ("draft", "returned"):
+            goals_to_insert.append({
                 "goal_sheet_id": sheet["id"],
                 "shared_goal_group_id": group_id,
                 "title": body.title,
@@ -451,12 +457,15 @@ async def create_shared_goal(
                 "thrust_area_id": body.thrust_area_id,
                 "uom_type": body.uom_type,
                 "target_value": body.target_value,
-                "target_date": body.target_date.isoformat() if body.target_date else None,
+                "target_date": target_date_iso,
                 "weightage": 10,
-            }).execute()
+            })
             pushed += 1
         else:
             skipped.append(emp_id)
+
+    if goals_to_insert:
+        supabase.table("goals").insert(goals_to_insert).execute()
 
     log_audit("shared_goal_group", group_id, "push_shared", current_user["id"],
               new_values={"pushed": pushed, "skipped": len(skipped)})
